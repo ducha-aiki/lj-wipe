@@ -43,15 +43,23 @@ class TaskControl:
     def is_active(self):
         return not self.stopped.is_set()
 
+    def is_alive(self):
+        alive = filter(bool, map(Process.is_alive, self.processes))
+	print '---- %d child processes are still alive' % len(alive)
+        return alive
+
     def stop(self):
         self.stopped.set()
-	for p in self.processes:
-		p.join()
+        self.queue.close()
+        print '-- waiting for processes to finish'
+	map(Process.join, self.processes)
+        self.queue.cancel_join_thread()
 
     def send_chunk(self, items):
         map(self.queue.put, items)
         print '--- waiting for queue to complete'
-        self.queue.join()
+        while self.get_stats()[1] and self.is_alive():
+            time.sleep(1)
 
     def get(self):
         while self.is_active():
@@ -65,9 +73,12 @@ class TaskControl:
         self.count_processed.value += 1
         if not self.count_processed.value % 20:
             print '%d items processed' % self.count_processed.value
+	time.sleep(0.5)
 
     def get_stats(self):
-        return (self.count_processed.value, self.queue.qsize())
+        stats = self.count_processed.value, self.queue.qsize()
+        print '--- %d items processed, %d queued' % stats
+        return stats
 
 class CleanWorker(Process):
     def __init__(self, control, client):
@@ -83,6 +94,7 @@ class CleanWorker(Process):
                     ljclient.delevent(data['itemid']) # rate limit may raise here
             except Exception, e:
                     print "Exception while deleting entry %s" % data, e
+                    return
 
             self.control.tick()
 
@@ -111,11 +123,16 @@ if __name__ == '__main__':
 	ljclient = ljc.get_lj()
 	print 'main thread logged in'
         
-        while True:
+        while controller.is_alive():
                 items = ljclient.getevents_lastn(n = args.chunk, before = args.before)['events']
                 print '--- fetched %d items' % len(items)
                 if not items:
                     break
                 controller.send_chunk(items)
-            
+        print 'stopping'
         controller.stop()
+        if items:
+            print 'still left unprocessed items'
+            sys.exit(1)
+        else:
+            print 'all done'
